@@ -34,7 +34,7 @@ const lineBlob = new messagingApi.MessagingApiBlobClient({
 });
 
 const gemini = new GoogleGenerativeAI(GEMINI_API_KEY);
-const geminiModel = gemini.getGenerativeModel({ model: 'gemini-1.5-pro' });
+const geminiModel = gemini.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
 // ── Gemini へ渡すプロンプト ───────────────────────────────────
 const ESTIMATE_PROMPT = `この画像を分析して、エアコン設置・照明工事・電気工事の観点からプロの電気工事業者として見積もりを提供してください。
@@ -78,29 +78,37 @@ async function streamToBuffer(readable: Readable): Promise<Buffer> {
 }
 
 // ── 画像分析処理 ──────────────────────────────────────────────
+const MAX_LINE_TEXT_LENGTH = 4500;
+
 async function analyzeImage(messageId: string): Promise<string> {
-  // LINE から画像をダウンロード
   const response = await lineBlob.getMessageContent(messageId);
   const imageBuffer = await streamToBuffer(response as unknown as Readable);
   const base64Image = imageBuffer.toString('base64');
 
-  // JPEG か PNG かを判定（LINE 画像はほぼ JPEG）
   const mimeType = imageBuffer[0] === 0xff && imageBuffer[1] === 0xd8
     ? 'image/jpeg'
     : 'image/png';
 
-  // Gemini API で画像分析
+  console.log(`📸 画像サイズ: ${imageBuffer.length} bytes, MIME: ${mimeType}`);
+
   const result = await geminiModel.generateContent([
-    {
-      inlineData: {
-        mimeType,
-        data: base64Image,
-      },
-    },
-    ESTIMATE_PROMPT,
+    { inlineData: { mimeType, data: base64Image } },
+    { text: ESTIMATE_PROMPT },
   ]);
 
-  return result.response.text();
+  const candidate = result.response.candidates?.[0];
+  if (!candidate) {
+    throw new Error('Gemini からの応答にcandidateがありません');
+  }
+  if (candidate.finishReason && candidate.finishReason !== 'STOP') {
+    console.warn(`⚠️ Gemini finishReason: ${candidate.finishReason}`);
+  }
+
+  let text = result.response.text();
+  if (text.length > MAX_LINE_TEXT_LENGTH) {
+    text = text.slice(0, MAX_LINE_TEXT_LENGTH) + '\n\n（文字数制限のため省略）';
+  }
+  return text;
 }
 
 // ── Webhook イベントハンドラ ──────────────────────────────────
@@ -134,7 +142,8 @@ async function handleEvent(event: webhook.Event): Promise<void> {
 
     console.log('✅ 見積もり送信完了');
   } catch (error) {
-    console.error('❌ 画像処理エラー:', error);
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('❌ 画像処理エラー:', msg, error);
     await lineClient.replyMessage({
       replyToken,
       messages: [
