@@ -2,7 +2,6 @@ import express, { Request, Response } from 'express';
 import { messagingApi, middleware, webhook } from '@line/bot-sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
-import { Readable } from 'stream';
 
 dotenv.config();
 
@@ -26,10 +25,6 @@ const lineConfig = {
 };
 
 const lineClient = new messagingApi.MessagingApiClient({
-  channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
-});
-
-const lineBlob = new messagingApi.MessagingApiBlobClient({
   channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
 });
 
@@ -68,31 +63,41 @@ const ESTIMATE_PROMPT = `この画像を分析して、エアコン設置・照�
 ・築年数・配線状況・建物構造により費用が変動します
 ・すべての電気工事は電気工事士が施工します`;
 
-// ── ユーティリティ ────────────────────────────────────────────
-async function streamToBuffer(readable: Readable): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of readable) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as ArrayBuffer));
+// ── LINE から画像を直接ダウンロード ──────────────────────────
+// SDK の stream 変換を介さず fetch + arrayBuffer() で取得する
+async function downloadLineImage(messageId: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  const res = await fetch(
+    `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+    { headers: { Authorization: `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}` } },
+  );
+
+  if (!res.ok) {
+    throw new Error(`LINE image download failed: ${res.status} ${res.statusText}`);
   }
-  return Buffer.concat(chunks);
+
+  // Content-Type ヘッダーからMIMEタイプを取得（フォールバック: image/jpeg）
+  const contentType = res.headers.get('content-type') ?? 'image/jpeg';
+  const mimeType = contentType.split(';')[0].trim();
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+
+  if (buffer.length === 0) {
+    throw new Error('ダウンロードした画像データが空です');
+  }
+
+  return { buffer, mimeType };
 }
 
 // ── 画像分析処理 ──────────────────────────────────────────────
 const MAX_LINE_TEXT_LENGTH = 4500;
 
 async function analyzeImage(messageId: string): Promise<string> {
-  const response = await lineBlob.getMessageContent(messageId);
-  const imageBuffer = await streamToBuffer(response as unknown as Readable);
-  const base64Image = imageBuffer.toString('base64');
-
-  const mimeType = imageBuffer[0] === 0xff && imageBuffer[1] === 0xd8
-    ? 'image/jpeg'
-    : 'image/png';
+  const { buffer: imageBuffer, mimeType } = await downloadLineImage(messageId);
 
   console.log(`📸 画像サイズ: ${imageBuffer.length} bytes, MIME: ${mimeType}`);
 
   const result = await geminiModel.generateContent([
-    { inlineData: { mimeType, data: base64Image } },
+    { inlineData: { mimeType, data: imageBuffer.toString('base64') } },
     { text: ESTIMATE_PROMPT },
   ]);
 
@@ -100,6 +105,11 @@ async function analyzeImage(messageId: string): Promise<string> {
   if (!candidate) {
     throw new Error('Gemini からの応答にcandidateがありません');
   }
+
+  if (candidate.finishReason === 'SAFETY') {
+    return '⚠️ 画像の内容を分析できませんでした。別の写真をお試しください。';
+  }
+
   if (candidate.finishReason && candidate.finishReason !== 'STOP') {
     console.warn(`⚠️ Gemini finishReason: ${candidate.finishReason}`);
   }
@@ -117,7 +127,6 @@ async function handleEvent(event: webhook.Event): Promise<void> {
 
   const { replyToken, message } = event;
 
-  // 画像以外のメッセージへの案内
   if (message.type !== 'image') {
     await lineClient.replyMessage({
       replyToken,
@@ -159,12 +168,10 @@ async function handleEvent(event: webhook.Event): Promise<void> {
 // ── Express サーバー ──────────────────────────────────────────
 const app = express();
 
-// ヘルスチェック
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// LINE Webhook エンドポイント（署名検証ミドルウェアを通す）
 app.post(
   '/webhook',
   middleware(lineConfig),
