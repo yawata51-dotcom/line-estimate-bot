@@ -29,7 +29,7 @@ const lineClient = new messagingApi.MessagingApiClient({
 });
 
 const gemini = new GoogleGenerativeAI(GEMINI_API_KEY);
-const geminiModel = gemini.getGenerativeModel({ model: 'gemini-1.5-flash' });
+const geminiModel = gemini.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
 
 // ── Gemini へ渡すプロンプト ───────────────────────────────────
 const ESTIMATE_PROMPT = `この画像を分析して、エアコン設置・照明工事・電気工事の観点からプロの電気工事業者として見積もりを提供してください。
