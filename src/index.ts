@@ -31,11 +31,34 @@ const lineClient = new messagingApi.MessagingApiClient({
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // ── Claude へ渡すプロンプト ───────────────────────────────────
-const ESTIMATE_PROMPT = `この画像を見て、エアコン設置・照明工事・電気工事の中で最も可能性が高い工事を1つだけ選び、以下の形式だけで回答してください。他の説明は一切不要です。
+const PRICE_TABLE = `【料金表】
+■ コンセント・スイッチ工事
+　7,150円〜16,500円
+
+■ エアコン工事（4〜6月）
+　交換：38,390円〜
+　新規：39,600円〜
+
+■ エアコン工事（1〜3月）
+　交換：28,490円〜
+　新規：29,700円〜
+
+■ エアコン工事（7〜12月）
+　交換：48,290円〜
+　新規：49,500円〜`;
+
+function buildPrompt(): string {
+  const month = new Date().getMonth() + 1;
+  return `現在の月は${month}月です。
+
+${PRICE_TABLE}
+
+この画像を見て、上記料金表の中で最も可能性が高い工事を1つだけ選び、以下の形式だけで回答してください。他の説明は一切不要です。エアコンの場合は現在の月から該当する季節の料金を使い、交換か新規かを画像から判断してください。
 
 【工事内容】（工事名と簡単な作業内容を1〜2行で）
 【概算費用】〇〇円〜〇〇円
 ※現地確認後に正式お見積もりをお送りします。お気軽にご連絡ください📞`;
+}
 
 // ── LINE から画像を直接ダウンロード ──────────────────────────
 async function downloadLineImage(messageId: string): Promise<{ buffer: Buffer; mimeType: string }> {
@@ -91,7 +114,7 @@ async function analyzeImage(messageId: string): Promise<string> {
           },
           {
             type: 'text',
-            text: ESTIMATE_PROMPT,
+            text: buildPrompt(),
           },
         ],
       },
