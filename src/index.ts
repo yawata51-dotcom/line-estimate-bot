@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { messagingApi, middleware, webhook } from '@line/bot-sdk';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -9,11 +9,11 @@ dotenv.config();
 const {
   LINE_CHANNEL_SECRET,
   LINE_CHANNEL_ACCESS_TOKEN,
-  GEMINI_API_KEY,
+  ANTHROPIC_API_KEY,
   PORT = '3000',
 } = process.env;
 
-if (!LINE_CHANNEL_SECRET || !LINE_CHANNEL_ACCESS_TOKEN || !GEMINI_API_KEY) {
+if (!LINE_CHANNEL_SECRET || !LINE_CHANNEL_ACCESS_TOKEN || !ANTHROPIC_API_KEY) {
   console.error('❌ 必要な環境変数が設定されていません。.env ファイルを確認してください。');
   process.exit(1);
 }
@@ -28,10 +28,9 @@ const lineClient = new messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
 });
 
-const gemini = new GoogleGenerativeAI(GEMINI_API_KEY);
-const geminiModel = gemini.getGenerativeModel({ model: 'gemini-2.5-flash' });
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-// ── Gemini へ渡すプロンプト ───────────────────────────────────
+// ── Claude へ渡すプロンプト ───────────────────────────────────
 const ESTIMATE_PROMPT = `この画像を見て、エアコン設置・照明工事・電気工事の中で最も可能性が高い工事を1つだけ選び、以下の形式だけで回答してください。他の説明は一切不要です。
 
 【工事内容】（工事名と簡単な作業内容を1〜2行で）
@@ -39,7 +38,6 @@ const ESTIMATE_PROMPT = `この画像を見て、エアコン設置・照明工�
 ※現地確認後に正式お見積もりをお送りします。お気軽にご連絡ください📞`;
 
 // ── LINE から画像を直接ダウンロード ──────────────────────────
-// SDK の stream 変換を介さず fetch + arrayBuffer() で取得する
 async function downloadLineImage(messageId: string): Promise<{ buffer: Buffer; mimeType: string }> {
   const res = await fetch(
     `https://api-data.line.me/v2/bot/message/${messageId}/content`,
@@ -50,10 +48,8 @@ async function downloadLineImage(messageId: string): Promise<{ buffer: Buffer; m
     throw new Error(`LINE image download failed: ${res.status} ${res.statusText}`);
   }
 
-  // Content-Type ヘッダーからMIMEタイプを取得（フォールバック: image/jpeg）
   const contentType = res.headers.get('content-type') ?? 'image/jpeg';
   const mimeType = contentType.split(';')[0].trim();
-
   const buffer = Buffer.from(await res.arrayBuffer());
 
   if (buffer.length === 0) {
@@ -66,30 +62,48 @@ async function downloadLineImage(messageId: string): Promise<{ buffer: Buffer; m
 // ── 画像分析処理 ──────────────────────────────────────────────
 const MAX_LINE_TEXT_LENGTH = 4500;
 
+const VALID_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
+type ImageMediaType = typeof VALID_MEDIA_TYPES[number];
+
 async function analyzeImage(messageId: string): Promise<string> {
   const { buffer: imageBuffer, mimeType } = await downloadLineImage(messageId);
 
   console.log(`📸 画像サイズ: ${imageBuffer.length} bytes, MIME: ${mimeType}`);
 
-  const result = await geminiModel.generateContent([
-    { inlineData: { mimeType, data: imageBuffer.toString('base64') } },
-    { text: ESTIMATE_PROMPT },
-  ]);
+  const mediaType: ImageMediaType = VALID_MEDIA_TYPES.includes(mimeType as ImageMediaType)
+    ? (mimeType as ImageMediaType)
+    : 'image/jpeg';
 
-  const candidate = result.response.candidates?.[0];
-  if (!candidate) {
-    throw new Error('Gemini からの応答にcandidateがありません');
+  const response = await anthropic.messages.create({
+    model: 'claude-opus-4-7',
+    max_tokens: 1024,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: mediaType,
+              data: imageBuffer.toString('base64'),
+            },
+          },
+          {
+            type: 'text',
+            text: ESTIMATE_PROMPT,
+          },
+        ],
+      },
+    ],
+  });
+
+  const textBlock = response.content.find(block => block.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new Error('Claude からテキスト応答が返りませんでした');
   }
 
-  if (candidate.finishReason === 'SAFETY') {
-    return '⚠️ 画像の内容を分析できませんでした。別の写真をお試しください。';
-  }
-
-  if (candidate.finishReason && candidate.finishReason !== 'STOP') {
-    console.warn(`⚠️ Gemini finishReason: ${candidate.finishReason}`);
-  }
-
-  let text = result.response.text();
+  let text = textBlock.text;
   if (text.length > MAX_LINE_TEXT_LENGTH) {
     text = text.slice(0, MAX_LINE_TEXT_LENGTH) + '\n\n（文字数制限のため省略）';
   }
