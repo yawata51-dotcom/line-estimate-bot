@@ -184,18 +184,7 @@ async function handleEvent(event: webhook.Event): Promise<void> {
 
   const { replyToken, message } = event;
 
-  if (message.type !== 'image') {
-    await lineClient.replyMessage({
-      replyToken,
-      messages: [
-        {
-          type: 'text',
-          text: '📷 現場の写真を送ってください。\nエアコン設置・照明工事・電気工事の概算見積もりをAIが分析してお伝えします。',
-        },
-      ],
-    });
-    return;
-  }
+  if (message.type !== 'image') return;
 
   try {
     console.log(`📩 画像受信 messageId=${message.id}`);
