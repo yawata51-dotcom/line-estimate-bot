@@ -10,6 +10,7 @@ const {
   LINE_CHANNEL_SECRET,
   LINE_CHANNEL_ACCESS_TOKEN,
   ANTHROPIC_API_KEY,
+  GAS_API_URL,
   PORT = '3000',
 } = process.env;
 
@@ -17,6 +18,32 @@ if (!LINE_CHANNEL_SECRET || !LINE_CHANNEL_ACCESS_TOKEN || !ANTHROPIC_API_KEY) {
   console.error('❌ 必要な環境変数が設定されていません。.env ファイルを確認してください。');
   process.exit(1);
 }
+
+// ── 登録フロー メッセージ設定（ここを編集してカスタマイズ） ──
+const REGISTRATION_MESSAGES = {
+  // 稲毛クイズ応募への自動返信
+  quizReply:
+    'ご応募ありがとうございます！🎉\n\n抽選対象として承りました。\n正解者の中から抽選で5名様にQUOカード500円分をプレゼントいたします🎁\n\n当選された方には後日このLINEよりご連絡いたします。\n引き続きヤハタデンキをよろしくお願いいたします😊',
+
+  // 未登録ユーザーが最初にメッセージを送ってきた時
+  askPhone: 'はじめまして！ヤハタデンキ公式LINEです😊\n\nご登録のため、お電話番号をご入力ください。\n（例：090-1234-5678）',
+
+  // 電話番号で顧客マスタに見つかった時
+  registeredSuccess: (name: string) =>
+    `${name} 様、登録が完了しました✅\n\nこれからは工事の写真をお送りいただくと、概算見積もりをすぐにご返信します📸`,
+
+  // 電話番号が顧客マスタに見つからなかった時
+  notFound: '電話番号が見つかりませんでした。\n番号を確認して再度ご入力いただくか、お電話（📞）でお問い合わせください。',
+
+  // 電話番号の形式が正しくない時
+  invalidPhone: '電話番号の形式が正しくありません。\n数字のみ、またはハイフン付きで入力してください。\n（例：090-1234-5678）',
+
+  // GAS API が使えない場合（GAS_API_URL未設定）
+  gasNotConfigured: '現在登録システムに接続できません。お手数ですが、お電話でお問い合わせください。',
+
+  // 登録済みユーザーがテキストを送ってきた時（写真を促す）
+  sendPhoto: '写真を送っていただくと、概算見積もりをお答えします📸',
+};
 
 // ── クライアント初期化 ────────────────────────────────────────
 const lineConfig = {
@@ -29,6 +56,11 @@ const lineClient = new messagingApi.MessagingApiClient({
 });
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+// ── 登録フロー状態管理（メモリ） ─────────────────────────────
+// サーバー再起動でリセットされる。永続化が必要なら Redis 等に移行。
+const userState = new Map<string, 'waiting_phone'>();
+const registeredUsers = new Set<string>();
 
 // ── Claude へ渡すプロンプト ───────────────────────────────────
 const PRICE_TABLE = `【料金表】
@@ -178,37 +210,143 @@ async function analyzeImage(messageId: string): Promise<string> {
   return text;
 }
 
+// ── GAS API で電話番号照合・LINE user ID 登録 ─────────────────
+async function registerByPhone(tel: string, lineUserId: string): Promise<{ success: boolean; name?: string; msg?: string }> {
+  if (!GAS_API_URL) {
+    return { success: false, msg: 'gas_not_configured' };
+  }
+
+  const url = `${GAS_API_URL}?action=register&tel=${encodeURIComponent(tel)}&lineUserId=${encodeURIComponent(lineUserId)}`;
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`GAS API error: ${res.status}`);
+  }
+
+  return res.json() as Promise<{ success: boolean; name?: string; msg?: string }>;
+}
+
+// ── 電話番号らしい文字列かチェック ───────────────────────────
+function looksLikePhone(text: string): boolean {
+  const digits = text.replace(/[^\d]/g, '');
+  return digits.length >= 10 && digits.length <= 11;
+}
+
 // ── Webhook イベントハンドラ ──────────────────────────────────
 async function handleEvent(event: webhook.Event): Promise<void> {
   if (event.type !== 'message' || !event.replyToken) return;
 
   const { replyToken, message } = event;
+  const userId = (event as webhook.MessageEvent & { source: { userId?: string } }).source?.userId;
 
-  if (message.type !== 'image') return;
+  // ── 画像メッセージ ────────────────────────────────────────
+  if (message.type === 'image') {
+    // 未登録でも画像は処理する（登録なしで使えるようにする）
+    try {
+      console.log(`📩 画像受信 messageId=${message.id}`);
+      const estimateText = await analyzeImage(message.id);
 
-  try {
-    console.log(`📩 画像受信 messageId=${message.id}`);
-    const estimateText = await analyzeImage(message.id);
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: estimateText }],
+      });
 
-    await lineClient.replyMessage({
-      replyToken,
-      messages: [{ type: 'text', text: estimateText }],
-    });
-
-    console.log('✅ 見積もり送信完了');
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error('❌ 画像処理エラー:', msg, error);
-    await lineClient.replyMessage({
-      replyToken,
-      messages: [
-        {
-          type: 'text',
-          text: '⚠️ 処理中にエラーが発生しました。しばらく時間をおいて再度お試しください。',
-        },
-      ],
-    });
+      console.log('✅ 見積もり送信完了');
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('❌ 画像処理エラー:', msg, error);
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [
+          {
+            type: 'text',
+            text: '⚠️ 処理中にエラーが発生しました。しばらく時間をおいて再度お試しください。',
+          },
+        ],
+      });
+    }
+    return;
   }
+
+  // ── テキストメッセージ ────────────────────────────────────
+  if (message.type !== 'text') return;
+
+  const text = message.text.trim();
+
+  if (!userId) return;
+
+  // クイズ応募キーワード検出（登録状態に関係なく最優先で返信）
+  const quizPattern = /[①②③]|^[123]$|飛行場|遊園地|温泉/;
+  if (quizPattern.test(text)) {
+    await lineClient.replyMessage({
+      replyToken,
+      messages: [{ type: 'text', text: REGISTRATION_MESSAGES.quizReply }],
+    });
+    return;
+  }
+
+  // 登録済みユーザー → 写真を促す
+  if (registeredUsers.has(userId)) {
+    await lineClient.replyMessage({
+      replyToken,
+      messages: [{ type: 'text', text: REGISTRATION_MESSAGES.sendPhoto }],
+    });
+    return;
+  }
+
+  // 電話番号待ち状態 → 照合処理
+  if (userState.get(userId) === 'waiting_phone') {
+    if (!looksLikePhone(text)) {
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: REGISTRATION_MESSAGES.invalidPhone }],
+      });
+      return;
+    }
+
+    try {
+      const result = await registerByPhone(text, userId);
+
+      if (result.msg === 'gas_not_configured') {
+        userState.delete(userId);
+        await lineClient.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: REGISTRATION_MESSAGES.gasNotConfigured }],
+        });
+        return;
+      }
+
+      if (result.success && result.name) {
+        userState.delete(userId);
+        registeredUsers.add(userId);
+        console.log(`✅ 登録完了: userId=${userId} name=${result.name}`);
+        await lineClient.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: REGISTRATION_MESSAGES.registeredSuccess(result.name) }],
+        });
+      } else {
+        // 見つからなかった → もう一度入力を促す（状態は維持）
+        await lineClient.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: REGISTRATION_MESSAGES.notFound }],
+        });
+      }
+    } catch (error) {
+      console.error('❌ 登録エラー:', error);
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: '⚠️ システムエラーが発生しました。しばらく後でお試しください。' }],
+      });
+    }
+    return;
+  }
+
+  // 未登録・未対話 → 電話番号を聞く
+  userState.set(userId, 'waiting_phone');
+  await lineClient.replyMessage({
+    replyToken,
+    messages: [{ type: 'text', text: REGISTRATION_MESSAGES.askPhone }],
+  });
 }
 
 // ── Express サーバー ──────────────────────────────────────────
