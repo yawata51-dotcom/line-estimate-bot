@@ -275,78 +275,14 @@ async function handleEvent(event: webhook.Event): Promise<void> {
 
   if (!userId) return;
 
-  // クイズ応募キーワード検出（登録状態に関係なく最優先で返信）
+  // クイズ応募キーワードのみ返信、それ以外のテキストは無視
   const quizPattern = /[①②③]|^[123]$|飛行場|遊園地|温泉/;
   if (quizPattern.test(text)) {
     await lineClient.replyMessage({
       replyToken,
       messages: [{ type: 'text', text: REGISTRATION_MESSAGES.quizReply }],
     });
-    return;
   }
-
-  // 登録済みユーザー → 写真を促す
-  if (registeredUsers.has(userId)) {
-    await lineClient.replyMessage({
-      replyToken,
-      messages: [{ type: 'text', text: REGISTRATION_MESSAGES.sendPhoto }],
-    });
-    return;
-  }
-
-  // 電話番号待ち状態 → 照合処理
-  if (userState.get(userId) === 'waiting_phone') {
-    if (!looksLikePhone(text)) {
-      await lineClient.replyMessage({
-        replyToken,
-        messages: [{ type: 'text', text: REGISTRATION_MESSAGES.invalidPhone }],
-      });
-      return;
-    }
-
-    try {
-      const result = await registerByPhone(text, userId);
-
-      if (result.msg === 'gas_not_configured') {
-        userState.delete(userId);
-        await lineClient.replyMessage({
-          replyToken,
-          messages: [{ type: 'text', text: REGISTRATION_MESSAGES.gasNotConfigured }],
-        });
-        return;
-      }
-
-      if (result.success && result.name) {
-        userState.delete(userId);
-        registeredUsers.add(userId);
-        console.log(`✅ 登録完了: userId=${userId} name=${result.name}`);
-        await lineClient.replyMessage({
-          replyToken,
-          messages: [{ type: 'text', text: REGISTRATION_MESSAGES.registeredSuccess(result.name) }],
-        });
-      } else {
-        // 見つからなかった → もう一度入力を促す（状態は維持）
-        await lineClient.replyMessage({
-          replyToken,
-          messages: [{ type: 'text', text: REGISTRATION_MESSAGES.notFound }],
-        });
-      }
-    } catch (error) {
-      console.error('❌ 登録エラー:', error);
-      await lineClient.replyMessage({
-        replyToken,
-        messages: [{ type: 'text', text: '⚠️ システムエラーが発生しました。しばらく後でお試しください。' }],
-      });
-    }
-    return;
-  }
-
-  // 未登録・未対話 → 電話番号を聞く
-  userState.set(userId, 'waiting_phone');
-  await lineClient.replyMessage({
-    replyToken,
-    messages: [{ type: 'text', text: REGISTRATION_MESSAGES.askPhone }],
-  });
 }
 
 // ── Express サーバー ──────────────────────────────────────────
