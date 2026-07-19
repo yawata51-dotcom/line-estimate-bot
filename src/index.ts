@@ -62,7 +62,37 @@ const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const userState = new Map<string, 'waiting_phone'>();
 const registeredUsers = new Set<string>();
 
-// ── Claude へ渡すプロンプト ───────────────────────────────────
+// ── 料金表 ────────────────────────────────────────────────────
+// 通常はスプレッドシート「LINEボット料金表」（商品見積システムのシート内）から取得する。
+// シートを編集すれば最大10分でボットに反映される。取得失敗時は下の内蔵表を使う。
+const PRICE_TABLE_URL =
+  'https://script.google.com/macros/s/AKfycbwvdA3LTxWHAEk2PLPKcOdWjS8hJMSLJYApa3O2EU9vvBsgdsRn8SA3Q-EZSgGccvM/exec?action=botprices';
+const PRICE_CACHE_MS = 10 * 60 * 1000;
+
+let cachedPriceTable: string | null = null;
+let priceFetchedAt = 0;
+
+async function getPriceTable(): Promise<string> {
+  const now = Date.now();
+  if (cachedPriceTable && now - priceFetchedAt < PRICE_CACHE_MS) return cachedPriceTable;
+  try {
+    const res = await fetch(PRICE_TABLE_URL);
+    if (res.ok) {
+      const text = (await res.text()).trim();
+      if (text.includes('料金表')) {
+        cachedPriceTable = text;
+        priceFetchedAt = now;
+        return text;
+      }
+    }
+    console.error(`⚠️ 料金表取得に失敗（status=${res.status}）、内蔵の料金表を使用`);
+  } catch (err) {
+    console.error('⚠️ 料金表取得エラー、内蔵の料金表を使用:', err);
+  }
+  return cachedPriceTable ?? PRICE_TABLE;
+}
+
+// 内蔵の料金表（シートから取得できないときのフォールバック）
 const PRICE_TABLE = `【料金表】
 ■ コンセント・スイッチ工事
 　出張費：2,750円（稲毛区内）
@@ -94,13 +124,18 @@ const PRICE_TABLE = `【料金表】
 　交換：48,290円〜
 　新規：49,500円〜`;
 
-function buildPrompt(): string {
+function buildPrompt(priceTable: string): string {
   const month = new Date().getMonth() + 1;
   return `現在の月は${month}月です。
 
-${PRICE_TABLE}
+${priceTable}
 
 この画像を見て、上記料金表の中で最も可能性が高い工事を判断し、以下のルールで回答してください。他の説明は一切不要です。
+
+【共通ルール】
+- お客様に送る文章なので、丁寧で親しみやすい日本語にすること
+- 写真が不鮮明・判断に迷う場合は、最も可能性が高い工事で概算を出したうえで、最後に確認の質問を1つだけ添えること（例：「エアコンの交換をご希望でしょうか？それとも新しいお部屋への新設でしょうか？」）
+- 写真が工事と無関係な場合（風景・人物など）は、見積は出さず「工事箇所やエアコン・分電盤などの写真をお送りいただくと概算見積をご返信できます📸」とだけ返すこと
 
 【エアコン工事の場合】
 現在の月から該当する季節の工事費を使い、交換か新規かを画像から判断する。以下の形式で回答：
@@ -174,8 +209,10 @@ async function analyzeImage(messageId: string): Promise<string> {
     ? (mimeType as ImageMediaType)
     : 'image/jpeg';
 
+  const priceTable = await getPriceTable();
+
   const response = await anthropic.messages.create({
-    model: 'claude-opus-4-7',
+    model: 'claude-opus-4-8',
     max_tokens: 1024,
     messages: [
       {
@@ -191,7 +228,7 @@ async function analyzeImage(messageId: string): Promise<string> {
           },
           {
             type: 'text',
-            text: buildPrompt(),
+            text: buildPrompt(priceTable),
           },
         ],
       },
