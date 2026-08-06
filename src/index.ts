@@ -270,6 +270,30 @@ function looksLikePhone(text: string): boolean {
 }
 
 // ── Webhook イベントハンドラ ──────────────────────────────────
+/**
+ * 返信する。
+ * 応答トークンは有効期限が短く、サーバーが寝起きだったり解析に時間が
+ * かかったりすると失効する。失効したときは push で送り直す。
+ */
+async function safeReply(
+  replyToken: string,
+  userId: string | undefined,
+  text: string,
+): Promise<void> {
+  try {
+    await lineClient.replyMessage({ replyToken, messages: [{ type: 'text', text }] });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`⚠️ reply失敗（トークン失効の可能性）→ pushで再送します: ${msg}`);
+    if (!userId) {
+      console.error('❌ userIdが無いため再送できません');
+      return;
+    }
+    await lineClient.pushMessage({ to: userId, messages: [{ type: 'text', text }] });
+    console.log('✅ pushで送信しました');
+  }
+}
+
 async function handleEvent(event: webhook.Event): Promise<void> {
   if (event.type !== 'message' || !event.replyToken) return;
 
@@ -282,25 +306,16 @@ async function handleEvent(event: webhook.Event): Promise<void> {
     try {
       console.log(`📩 画像受信 messageId=${message.id}`);
       const estimateText = await analyzeImage(message.id);
-
-      await lineClient.replyMessage({
-        replyToken,
-        messages: [{ type: 'text', text: estimateText }],
-      });
-
+      await safeReply(replyToken, userId, estimateText);
       console.log('✅ 見積もり送信完了');
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error('❌ 画像処理エラー:', msg, error);
-      await lineClient.replyMessage({
+      await safeReply(
         replyToken,
-        messages: [
-          {
-            type: 'text',
-            text: '⚠️ 処理中にエラーが発生しました。しばらく時間をおいて再度お試しください。',
-          },
-        ],
-      });
+        userId,
+        '⚠️ 処理中にエラーが発生しました。しばらく時間をおいて再度お試しください。',
+      );
     }
     return;
   }
@@ -332,16 +347,21 @@ app.get('/health', (_req: Request, res: Response) => {
 app.post(
   '/webhook',
   middleware(lineConfig),
-  async (req: Request, res: Response): Promise<void> => {
-    const events: webhook.Event[] = req.body.events;
+  (req: Request, res: Response): void => {
+    const events: webhook.Event[] = req.body.events ?? [];
 
-    try {
-      await Promise.all(events.map(handleEvent));
-      res.json({ status: 'ok' });
-    } catch (err) {
-      console.error('Webhook エラー:', err);
-      res.status(500).json({ status: 'error' });
-    }
+    // LINEには先に200を返す。
+    // 画像解析は10秒以上かかることがあり、待たせるとLINE側がタイムアウトして
+    // 「1枚目だけ反応がない」状態になるため、解析は返事のあとで進める。
+    res.json({ status: 'ok' });
+
+    void Promise.all(
+      events.map((ev) =>
+        handleEvent(ev).catch((err) => {
+          console.error('❌ イベント処理エラー:', err);
+        }),
+      ),
+    );
   },
 );
 
