@@ -2,11 +2,29 @@ name: Keep Render Alive
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 5分おきに実行
+    - cron: '*/10 * * * *'  # 10分おき（Renderは15分無通信で寝るため十分）
+  workflow_dispatch:        # 手動でも実行できるように
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render server
-        run: curl -s https://line-estimate-bot.onrender.com/health
+        run: |
+          # Renderは寝起きの1回目で接続を切ることがあるので、
+          # 起き上がるまで最大3回・1回あたり120秒まで待つ。
+          for i in 1 2 3; do
+            code=$(curl -s -o /tmp/body.txt -w "%{http_code}" \
+                     --max-time 120 --retry 2 --retry-all-errors --retry-delay 5 \
+                     https://line-estimate-bot.onrender.com/health || echo "000")
+            echo "試行 $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              cat /tmp/body.txt
+              echo ""
+              echo "✅ サーバーは起きています"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "❌ 3回試してもサーバーが応答しませんでした"
+          exit 1
