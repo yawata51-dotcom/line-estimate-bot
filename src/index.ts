@@ -282,13 +282,27 @@ async function safeReply(
 ): Promise<void> {
   try {
     await lineClient.replyMessage({ replyToken, messages: [{ type: 'text', text }] });
+    return;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`⚠️ reply失敗（トークン失効の可能性）→ pushで再送します: ${msg}`);
-    if (!userId) {
-      console.error('❌ userIdが無いため再送できません');
+    const status = (err as { status?: number; statusCode?: number })?.status
+                ?? (err as { statusCode?: number })?.statusCode;
+
+    // 応答トークンが切れていた時だけ push で送り直す。
+    // それ以外（通信の一時エラーなど）で push すると、実際には届いているのに
+    // 同じ内容がもう1通いってしまうため送らない。
+    const tokenExpired =
+      status === 400 && /reply token|Invalid reply token/i.test(msg);
+
+    if (!tokenExpired) {
+      console.error(`❌ 返信できませんでした（status=${status}）: ${msg}`);
       return;
     }
+    if (!userId) {
+      console.error('❌ 応答トークン切れ。userIdが無いため再送できません');
+      return;
+    }
+    console.warn('⚠️ 応答トークン切れ → pushで送り直します');
     await lineClient.pushMessage({ to: userId, messages: [{ type: 'text', text }] });
     console.log('✅ pushで送信しました');
   }
