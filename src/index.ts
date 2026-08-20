@@ -309,6 +309,13 @@ async function safeReply(
 }
 
 async function handleEvent(event: webhook.Event): Promise<void> {
+  // グループに招かれたとき・グループで発言があったときに groupId をログに出す。
+  // 成約通知をグループへ送るために、この値を商品見積システムに登録する。
+  const src = (event as { source?: { type?: string; groupId?: string; roomId?: string } }).source;
+  if (src?.groupId || src?.roomId) {
+    console.log(`👥 グループID: ${src.groupId ?? src.roomId}（event=${event.type}）`);
+  }
+
   if (event.type !== 'message' || !event.replyToken) return;
 
   const { replyToken, message } = event;
