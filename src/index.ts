@@ -346,6 +346,16 @@ async function handleEvent(event: webhook.Event): Promise<void> {
 
   const text = message.text.trim();
 
+  // グループで「グループID」と打つと、そのIDを返す（成約通知の設定に使う）
+  const gid = src?.groupId ?? src?.roomId;
+  if (gid && /^グループ\s*ID$/i.test(text)) {
+    await lineClient.replyMessage({
+      replyToken,
+      messages: [{ type: 'text', text: gid }],
+    });
+    return;
+  }
+
   if (!userId) return;
 
   // クイズ応募キーワードのみ返信、それ以外のテキストは無視
