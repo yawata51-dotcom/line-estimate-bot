@@ -308,6 +308,9 @@ async function safeReply(
   }
 }
 
+/** 画像への返信の最後に必ず付ける一文（AIが自動で答えていると分かるように） */
+const AUTO_REPLY_NOTE = '\n\n※こちらは画像を見て自動返信しています。';
+
 async function handleEvent(event: webhook.Event): Promise<void> {
   // グループに招かれたとき・グループで発言があったときに groupId をログに出す。
   // 成約通知をグループへ送るために、この値を商品見積システムに登録する。
@@ -327,7 +330,7 @@ async function handleEvent(event: webhook.Event): Promise<void> {
     try {
       console.log(`📩 画像受信 messageId=${message.id}`);
       const estimateText = await analyzeImage(message.id);
-      await safeReply(replyToken, userId, estimateText);
+      await safeReply(replyToken, userId, estimateText + AUTO_REPLY_NOTE);
       console.log('✅ 見積もり送信完了');
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
